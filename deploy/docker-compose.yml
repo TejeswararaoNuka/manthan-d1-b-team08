@@ -21,6 +21,24 @@ x-superset-common: &superset-common
     - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
   mem_limit: 1500m
 
+x-producer-common: &producer-common
+  build:
+    context: ..
+    dockerfile: deploy/producer/Dockerfile
+  image: streamguard/producer:dev
+  profiles: ["producer"]
+  env_file: ../.env
+  environment:
+    # Inside Docker, use service names instead of PC 1's LAN values from .env.
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: "5432"
+    KAFKA_BOOTSTRAP: kafka:9092
+  volumes:
+    - ../src:/opt/streamguard/src:ro
+    - ../config:/opt/streamguard/config:ro
+    - ../data/expected:/opt/streamguard/data/expected
+  mem_limit: 256m
+
 services:
   # ---------------------------------------------------------------------------
   # Kafka: single-node KRaft (broker + controller in one process)
@@ -173,26 +191,36 @@ services:
   #       condition: service_healthy
   #   restart: unless-stopped
   #
-  # producer:
-  #   build:
-  #     context: ./producer           # python:3.13-slim + requirements.txt
-  #   env_file: ../.env
-  #   environment:
-  #     PYTHONPATH: /opt/streamguard/src
-  #     POSTGRES_HOST: postgres
-  #     KAFKA_BOOTSTRAP: kafka:9092
-  #   volumes:
-  #     - ../src:/opt/streamguard/src:ro
-  #     - ../config:/opt/streamguard/config:ro
-  #   command: ["python", "-m", "streamguard.producer"]
-  #   depends_on:
-  #     kafka-init:
-  #       condition: service_completed_successfully
-  #   restart: unless-stopped
-  #
+  # ---------------------------------------------------------------------------
+  # Producer (profile "producer"): synthetic payment events -> payments.raw
+  #   docker compose --env-file .env -f deploy/docker-compose.yml --profile producer up -d --build
+  # producer-seed writes 30-day card baselines first (same --seed/--cards as the producer).
+  # Requires the schema: python scripts/apply_sql.py (once, from any laptop).
+  # Scenario run:  ... --profile producer run --rm producer --scenario all
+  #   (writes data/expected/all.json on PC 1)
+  # ---------------------------------------------------------------------------
+  producer-seed:
+    <<: *producer-common
+    entrypoint: ["python", "-m", "streamguard.producer.seed_baseline"]
+    command: ["--seed", "42", "--cards", "5000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  producer:
+    <<: *producer-common
+    command: ["--rate", "200", "--burst-rate", "1000", "--burst-every", "60",
+              "--burst-seconds", "5", "--seed", "42", "--cards", "5000"]
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      producer-seed:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   # monitor:
-  #   build:
-  #     context: ./producer           # same python image as the producer
+  #   image: streamguard/producer:dev  # same python image as the producer
   #   env_file: ../.env
   #   environment:
   #     PYTHONPATH: /opt/streamguard/src

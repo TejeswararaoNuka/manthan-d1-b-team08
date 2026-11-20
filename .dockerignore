@@ -1,0 +1,13 @@
+# Build context is the repo root (deploy/*/Dockerfile copy only requirements files).
+# Keep secrets and bulky local state out of the context.
+.env
+.env.*
+!.env.example
+.git
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+data
+logs
