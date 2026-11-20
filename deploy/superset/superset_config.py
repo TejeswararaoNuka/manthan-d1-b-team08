@@ -20,5 +20,5 @@ SQLALCHEMY_DATABASE_URI = URL.create(
     database="superset",
 ).render_as_string(hide_password=False)
 
-# Analysts read only; feedback is written by the Streamlit app (D-05).
+# Analysts read only; feedback goes through a separate feedback_writer connection (D-05).
 # DML stays disabled on data sources (Superset's default allow_dml=False).
