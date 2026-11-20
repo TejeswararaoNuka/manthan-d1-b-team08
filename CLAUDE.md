@@ -52,27 +52,27 @@ PostgreSQL 16 · Superset 6.0.0 · Docker Compose. **No Airflow.**
 | `AMOUNT_OUT_OF_RANGE` | amount <= 0 or above ceiling | DLQ |
 | `CURRENCY_NOT_ALLOWED` | currency not in allowed list | DLQ |
 | `FUTURE_EVENT_TIME` | event_time > now + 24h | DLQ |
-| `LATE_EVENT` | older than the 2-minute watermark | **Not DLQ**: kept in `enriched_txn` with `is_late=true`, excluded from windowed rules, counted in metrics (D-04) |
+| `LATE_EVENT` | older than the 2-minute watermark | **Not DLQ**: kept in `sg.enriched_transactions` with `is_late=true`, excluded from windowed rules, counted in metrics (D-04) |
 
 ## Idempotency
 - Every PostgreSQL write is an upsert on a natural key (`INSERT ... ON CONFLICT`).
-- `enriched_txn` unique on `event_id`; `alerts` unique on `alert_id` (`DO NOTHING`, keeps analyst
-  state); `agg_1min` on its window key, written with absolute values, never `count = count + ...`.
+- `sg.enriched_transactions` unique on `event_id`; `alerts` unique on `alert_id` (`DO NOTHING`, keeps analyst
+  state); `sg.agg_1min` on its window key, written with absolute values, never `count = count + ...`.
 - Delivery is at-least-once (ADR-01). A replay of the same input must not create duplicate rows.
   Kafka alert duplicates are acceptable; consumers dedup by `alert_id`.
 
 ## Rules and thresholds
-- Rule and DQ thresholds live in PostgreSQL config tables (`fraud_rule`, `merchant_blacklist`,
-  DQ config) and are re-read **every micro-batch**. Never hard-code a threshold in Python or SQL.
-- `config/*.yaml` holds defaults that a script loads into those tables.
+- Rule and DQ thresholds live in PostgreSQL config tables (`sg.rule_config`,
+  `sg.merchant_blacklist`, `sg.dq_config`) and are re-read **every micro-batch**. Never hard-code a threshold in Python or SQL.
+- `config/*.yaml` holds defaults that `scripts/apply_sql.py` loads into those tables.
 - Rule logic lives in `sql/rules/*.sql`, one file per rule, so it is testable against PostgreSQL
-  without Spark. Rules run in PostgreSQL against `enriched_txn` for the cards in the batch.
+  without Spark. Rules run in PostgreSQL against `sg.enriched_transactions` for the cards in the batch.
 
 ## Processor design
 - Entry point `process_batch(df, batch_id)` used by `foreachBatch`.
 - It must be testable with a static DataFrame: unit/spark tests build a DataFrame in memory and
   call it directly. No Kafka in unit tests.
-- Order inside a batch: validate -> DLQ invalid -> dedup -> upsert `enriched_txn` -> run rule SQL
+- Order inside a batch: validate -> DLQ invalid -> dedup -> upsert `sg.enriched_transactions` -> run rule SQL
   -> upsert `alerts` -> publish alerts to Kafka -> upsert `agg_1min`.
 - Keep pure logic (validation, hashing, parsing) in plain Python under `streamguard/common` so it
   is unit-testable without Spark.
