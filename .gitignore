@@ -1,0 +1,16 @@
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Runtime data
+data/checkpoints/*
+!data/checkpoints/.gitkeep
+data/expected/
+logs/
