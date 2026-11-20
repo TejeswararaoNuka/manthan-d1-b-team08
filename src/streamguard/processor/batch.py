@@ -20,10 +20,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from psycopg2.extras import Json, execute_values
+from psycopg2.extras import execute_values
 
 from streamguard.common.validation import DQConfig, InvalidEvent, format_event_time, validate_event
-from streamguard.rules.engine import run_rules
+from streamguard.rules.engine import insert_alerts, run_rules
 
 ALERTS_TOPIC = "payments.alerts"
 DLQ_TOPIC = "payments.dlq"
@@ -279,32 +279,7 @@ def process_records(records: Sequence[Record], batch_id: int, ctx: BatchContext)
 
         # 6. rules -> alerts
         candidates = run_rules(cur, rules, sorted(inserted))
-        new_alert_ids: list[str] = []
-        if candidates:
-            returned = execute_values(
-                cur,
-                """INSERT INTO sg.alerts (alert_id, rule_id, rule_version, card_token, event_ids,
-                                          severity, details, txn_status, event_time)
-                   VALUES %s
-                   ON CONFLICT (alert_id) DO NOTHING
-                   RETURNING alert_id""",
-                [
-                    (
-                        c.alert_id,
-                        c.rule_id,
-                        rules[c.rule_id]["version"],
-                        c.card_token,
-                        c.event_ids,
-                        rules[c.rule_id]["severity"],
-                        Json(c.details),
-                        c.txn_status,
-                        c.event_time,
-                    )
-                    for c in candidates
-                ],
-                fetch=True,
-            )
-            new_alert_ids = [r[0] for r in returned]
+        new_alert_ids = insert_alerts(cur, candidates, rules)
         result.new_alerts = len(new_alert_ids)
         result.alerts = [c.alert_id for c in candidates]
 

@@ -13,6 +13,8 @@ from decimal import Decimal
 from functools import cache
 from typing import Any
 
+from psycopg2.extras import Json, execute_values
+
 from streamguard.common import alert_id as aid
 from streamguard.common.settings import REPO_ROOT
 
@@ -102,3 +104,36 @@ def run_rules(
                 alert_id=alert,
             )
     return list(by_id.values())
+
+
+def insert_alerts(
+    cur, candidates: list[Candidate], rule_config: dict[str, dict[str, Any]]
+) -> list[str]:
+    """Insert candidates into sg.alerts (ON CONFLICT DO NOTHING keeps the first alert and any
+    analyst state, ADR-01). Returns the alert_ids that were actually new."""
+    if not candidates:
+        return []
+    returned = execute_values(
+        cur,
+        """INSERT INTO sg.alerts (alert_id, rule_id, rule_version, card_token, event_ids,
+                                  severity, details, txn_status, event_time)
+           VALUES %s
+           ON CONFLICT (alert_id) DO NOTHING
+           RETURNING alert_id""",
+        [
+            (
+                c.alert_id,
+                c.rule_id,
+                rule_config[c.rule_id]["version"],
+                c.card_token,
+                c.event_ids,
+                rule_config[c.rule_id]["severity"],
+                Json(c.details),
+                c.txn_status,
+                c.event_time,
+            )
+            for c in candidates
+        ],
+        fetch=True,
+    )
+    return [r[0] for r in returned]
