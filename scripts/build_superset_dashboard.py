@@ -29,6 +29,7 @@ from psycopg2 import sql  # noqa: E402
 from streamguard.common.settings import load_env, pg_connect  # noqa: E402
 
 DB_NAME = "StreamGuard (dash)"
+FEEDBACK_DB_NAME = "StreamGuard feedback (DML)"
 SLUG = "streamguard"
 PREFIX = "SG · "
 DATASETS = [
@@ -38,6 +39,8 @@ DATASETS = [
     "topRules",
     "alertBacklog",
     "rulePrecisionDaily",
+    "labelCoverage",
+    "recentLabels",
     "recentAlerts",
     "pipelineHealth",
     "lagOverTime",
@@ -152,17 +155,18 @@ def line(x: str, expression: str, label: str, groupby: list[str] | None = None, 
     }
 
 
-def bar(x: str, expression: str, label: str) -> dict:
+def bar(x: str, expression: str, label: str, more: list[tuple[str, str]] = ()) -> dict:
+    metrics = [metric(expression, label)] + [metric(e, lab) for e, lab in more]
     return {
         "viz_type": "echarts_timeseries_bar",
         "x_axis": x,
-        "metrics": [metric(expression, label)],
+        "metrics": metrics,
         "groupby": [],
         "adhoc_filters": [],
         "row_limit": 100,
         "time_range": "No filter",
         "orientation": "vertical",
-        "show_legend": False,
+        "show_legend": len(metrics) > 1,
         "y_axis_format": "SMART_NUMBER",
     }
 
@@ -252,7 +256,34 @@ CHARTS = [
     (
         "Alerts",
         2,
+        12,
+        50,
+        "Recent alerts",
+        "recentAlerts",
+        table(["alert_time", "rule_id", "severity", "label", "card_token"], "alert_time"),
+    ),
+    (
+        "Precision",
+        0,
         6,
+        40,
+        "Precision by rule (all time)",
+        "labelCoverage",
+        table(["rule_id", "precision", "labelled", "unreviewed"]),
+    ),
+    (
+        "Precision",
+        0,
+        6,
+        40,
+        "Labelled vs unreviewed",
+        "labelCoverage",
+        bar("rule_id", "SUM(labelled)", "Labelled", [("SUM(unreviewed)", "Unreviewed")]),
+    ),
+    (
+        "Precision",
+        1,
+        12,
         50,
         "Daily precision per rule",
         "rulePrecisionDaily",
@@ -271,13 +302,22 @@ CHARTS = [
         ),
     ),
     (
-        "Alerts",
+        "Precision",
         2,
         6,
         50,
-        "Recent alerts",
-        "recentAlerts",
-        table(["alert_time", "rule_id", "severity", "label", "card_token"], "alert_time"),
+        "Precision trend by rule",
+        "rulePrecisionDaily",
+        line("alert_day", "MAX(precision)", "Precision", ["rule_id"], grain="P1D"),
+    ),
+    (
+        "Precision",
+        2,
+        6,
+        50,
+        "Recent labels",
+        "recentLabels",
+        table(["noted_at", "rule_id", "label", "analyst", "comment"], "noted_at"),
     ),
     (
         "Pipeline health",
@@ -335,6 +375,14 @@ CHARTS = [
         table(["raised_at", "severity", "source", "message"], "raised_at"),
     ),
 ]
+
+
+def has_feedback_writer(conn) -> bool:
+    with conn.cursor() as cur:
+        cur.execute("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'feedback_writer')")
+        found = cur.fetchone()[0]
+    conn.rollback()
+    return found
 
 
 def connection_uri(env, conn) -> tuple[str, bool]:
@@ -419,6 +467,26 @@ def main() -> int:
     )
     print(f"connection '{DB_NAME}' (id {db_id}) as {'superset_ro' if has_ro else 'the .env user'}")
 
+    # 1b. SQL Lab connection for analyst labels (D-05): feedback_writer, DML allowed, and that
+    # role can only write sg.alert_feedback. Skipped (CLI only) if the role is missing.
+    if has_feedback_writer(conn):
+        pw = urllib.parse.quote(env.get("FEEDBACK_WRITER_PASSWORD", ""), safe="")
+        fb = {
+            "database_name": FEEDBACK_DB_NAME,
+            "sqlalchemy_uri": f"postgresql+psycopg2://feedback_writer:{pw}@postgres:5432/"
+            f"{env['POSTGRES_DB']}",
+            "expose_in_sqllab": True,
+            "allow_dml": True,
+        }
+        found = ss.find("database", "database_name", "eq", FEEDBACK_DB_NAME)
+        if found:
+            ss.call("PUT", f"/api/v1/database/{found[0]['id']}", fb)
+        else:
+            ss.call("POST", "/api/v1/database/", fb)
+        print(f"connection '{FEEDBACK_DB_NAME}' as feedback_writer (Allow DML, SQL Lab only)")
+    else:
+        print("feedback_writer missing: no SQL Lab feedback connection, use the CLI")
+
     # 2. datasets on dash.* only
     ds_ids: dict[str, int] = {}
     for name in DATASETS:
@@ -487,7 +555,7 @@ def main() -> int:
             "css": CSS,
         },
     )
-    print(f"dashboard: {base}/superset/dashboard/{SLUG}/ ({len(chart_ids)} charts, 3 tabs)")
+    print(f"dashboard: {base}/superset/dashboard/{SLUG}/ ({len(chart_ids)} charts, 4 tabs)")
 
     # 4. verify: rows through Superset == rows by SQL
     print(f"\n{'Dataset':<20}| {'Superset':>9} | {'SQL':>9} | ok")
