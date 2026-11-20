@@ -11,6 +11,9 @@ Design references: `docs/use_case_card.md`, `docs/architecture.md`, `docs/decisi
 - Only **PC 1** runs Docker (Kafka, PostgreSQL, processor, Superset).
 - Other laptops connect to PC 1 using `POSTGRES_HOST` and `KAFKA_BOOTSTRAP` from `.env`
   (copy `.env.example`). They install `requirements.txt` only: no Docker, no Java, no pyspark.
+- Laptop setup: `python -m venv .venv`, `pip install -r requirements.txt`, `pip install -e .`
+  (so `python -m streamguard...` works). `confluent-kafka` stays pinned to 2.10.0: newer
+  wheels are blocked by Windows Smart App Control.
 - Tests use `POSTGRES_TEST_DB`, **never** `POSTGRES_DB`.
 - Plain `pytest` runs unit tests only. Marked tests: `spark` (Java 17, PC 1 or CI), `kafka`,
   `integration`.
