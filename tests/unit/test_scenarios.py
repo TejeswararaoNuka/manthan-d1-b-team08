@@ -64,10 +64,12 @@ def reference_alerts(sc):
             ]
             if len(window) > 5:
                 found.add(aid.velocity_alert_id(e["card_token"], e["event_time"]))
-            if any(
-                r["country"] != e["country"]
-                and e["event_time"] - timedelta(minutes=30) < r["event_time"] < e["event_time"]
-                for r in card
+            earlier = [r for r in card if r["event_time"] < e["event_time"]]
+            prev = max(earlier, key=lambda r: r["event_time"]) if earlier else None
+            if (
+                prev is not None
+                and prev["country"] != e["country"]
+                and e["event_time"] - timedelta(minutes=30) < prev["event_time"]
             ):
                 found.add(aid.impossible_travel_alert_id(e["card_token"], e["event_id"]))
         base = sc.baselines.get(e["card_token"])

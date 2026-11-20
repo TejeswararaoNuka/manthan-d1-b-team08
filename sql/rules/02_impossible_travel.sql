@@ -1,9 +1,11 @@
--- IMPOSSIBLE_TRAVEL (D-06, D-07): an earlier non-late event of the same card in a different
--- country within (t - window_minutes, t). Exactly window_minutes apart does not alert.
+-- IMPOSSIBLE_TRAVEL (D-06, D-07): the card's previous non-late event was in a different
+-- country and within (t - window_minutes, t). Exactly window_minutes apart does not alert.
+-- Comparing with the *previous* event (a change of country), not any earlier event, gives one
+-- alert per border crossing instead of one for every later event in the window.
 -- Parameters: new_event_ids, window_minutes.
 -- Triggers are the new events, plus existing events of the same card up to one window after a
 -- new event (out-of-order arrivals). Late events are excluded (D-04).
--- event_ids = [most recent earlier event in another country, trigger].
+-- event_ids = [previous event, trigger].
 WITH new_events AS (
     SELECT e.card_token, e.event_time
       FROM sg.enriched_transactions e
@@ -35,10 +37,10 @@ SELECT c.card_token,
           FROM sg.enriched_transactions x
          WHERE x.card_token = c.card_token
            AND NOT x.is_late
-           AND x.country <> c.country
-           AND x.event_time > c.event_time - make_interval(mins => %(window_minutes)s)
            AND x.event_time < c.event_time
          ORDER BY x.event_time DESC, x.event_id
          LIMIT 1
        ) p
+ WHERE p.country <> c.country
+   AND p.event_time > c.event_time - make_interval(mins => %(window_minutes)s)
  ORDER BY c.event_time, c.event_id;

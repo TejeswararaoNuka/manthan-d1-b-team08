@@ -106,6 +106,17 @@ def test_travel_thirty_or_more_minutes_apart_does_not_alert(cur, gap_minutes):
     assert alerts(cur, ids, "IMPOSSIBLE_TRAVEL") == []
 
 
+def test_travel_alerts_once_per_country_change_not_for_every_later_event(cur):
+    ids = [add(cur, 0, country="IN"), add(cur, 300, country="GB")]
+    ids += [add(cur, 300 + 30 * i, country="GB") for i in range(1, 6)]  # stays in GB
+    ids.append(add(cur, 900, country="IN"))  # flies back
+    found = alerts(cur, ids, "IMPOSSIBLE_TRAVEL")
+    assert [(a.details["from_country"], a.details["to_country"]) for a in found] == [
+        ("IN", "GB"),
+        ("GB", "IN"),
+    ]
+
+
 def test_travel_same_country_does_not_alert(cur):
     ids = [add(cur, 0), add(cur, 60)]
     assert alerts(cur, ids, "IMPOSSIBLE_TRAVEL") == []
