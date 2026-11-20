@@ -1,5 +1,7 @@
 # Runbook: offset reset and replay
 
+Step-by-step version with backup and proof SQL: [runbook.md](runbook.md) §5.
+
 Why this works the way it does: ADR-02 in `docs/decisions.md` (Spark keeps offsets in its
 checkpoint, not in a Kafka consumer group). All commands run on this PC from the repo root,
 with `.venv` active. `DC` = `docker compose --env-file .env -f deploy/docker-compose.yml`.
@@ -17,9 +19,12 @@ duplicated; Kafka may receive duplicate alerts, which consumers drop by `alert_i
 2. Stop the processor: `$DC stop processor`
 3. Reset the checkpoint, stored watermark and processed offsets, then replay the retained
    topic (7 days) in one bounded run:
-   `$DC run --rm --no-deps -e STARTING_OFFSETS=earliest processor --reset --available-now`
-   - To start from specific offsets instead, use Spark's JSON form, e.g.
-     `{"payments.raw":{"0":1200,"1":-2}}` (-2 = earliest, -1 = latest) via a new checkpoint.
+   `$DC run --rm --no-deps processor --reset --available-now --starting-offsets earliest`
+   - To start from specific offsets instead, pass Spark's JSON form with all 6 partitions,
+     e.g. `--starting-offsets '{"payments.raw":{"0":1200,"1":-2,"2":-2,"3":-2,"4":-2,"5":-2}}'`
+     (-2 = earliest, -1 = latest).
+   - Always use `--reset`: deleting the checkpoint folder alone keeps the stored watermark and
+     `last_batch_id`, so the new batch IDs 0..N would be skipped as re-runs.
    - `kafka-consumer-groups --reset-offsets` does **not** work: Spark has no committed group.
 4. While it runs, the monitor shows the backlog as lag and raises an ops alert above the
    threshold; this is expected. Watch `$DC logs -f monitor`.

@@ -125,5 +125,6 @@ PostgreSQL 16 and Kafka 3.7.1 service containers.
 - [Use case card](docs/use_case_card.md)
 - [Architecture](docs/architecture.md)
 - [Decisions](docs/decisions.md) (D-01 … D-15, ADR-01, ADR-02)
-- [Replay runbook](docs/runbook/replay.md)
+- [Operations runbook](docs/runbook/runbook.md) (health, lag, replay, DLQ, broker down, thresholds, reset)
+- [Replay background](docs/runbook/replay.md)
 - [CLAUDE.md](CLAUDE.md): rules for working on this repo
