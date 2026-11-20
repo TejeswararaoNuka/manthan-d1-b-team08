@@ -62,3 +62,20 @@ def db(test_schema):
 @pytest.fixture
 def publisher():
     return FakePublisher()
+
+
+@pytest.fixture(scope="session")
+def spark():
+    """Local Spark session for tests marked spark (processor container: Java 17 + pyspark)."""
+    pytest.importorskip("pyspark")
+    from pyspark.sql import SparkSession
+
+    session = (
+        SparkSession.builder.master("local[2]")
+        .appName("streamguard-tests")
+        .config("spark.ui.enabled", "false")
+        .config("spark.sql.shuffle.partitions", "2")
+        .getOrCreate()
+    )
+    yield session
+    session.stop()

@@ -1,4 +1,6 @@
-"""Each rule in sql/rules/ against PostgreSQL (POSTGRES_TEST_DB), without Spark."""
+"""Each rule in sql/rules/ against PostgreSQL (POSTGRES_TEST_DB), without Spark.
+
+Rows are inserted straight into sg.enriched_transactions, then the rules engine runs."""
 
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -7,7 +9,8 @@ import pytest
 
 from streamguard.common import alert_id as aid
 from streamguard.processor.batch import _load_config
-from streamguard.rules.engine import run_rules
+from streamguard.rules.engine import insert_alerts, run_rules
+from tests.integration.test_processor_batch import run, scenario_batches
 
 pytestmark = pytest.mark.integration
 
@@ -186,3 +189,60 @@ def test_threshold_change_in_rule_config_applies_without_code_change(cur):
     )
     ids = [add(cur, 10 * i) for i in range(4)]
     assert len(alerts(cur, ids, "VELOCITY")) == 1
+
+
+def test_blacklist_similar_but_unlisted_merchant_does_not_trigger(cur):
+    # mer_bad00001..mer_bad00020 are seeded; 00021 only looks like them.
+    assert alerts(cur, [add(cur, 0, merchant="mer_bad00021")], "MERCHANT_BLACKLIST") == []
+
+
+# -- replay -----------------------------------------------------------------------------------
+
+
+def test_replay_running_rules_twice_on_same_events_creates_no_new_alerts(cur):
+    set_baseline(cur)
+    ids = [add(cur, 5 * i) for i in range(6)]
+    ids.append(add(cur, 40, merchant="mer_bad00001", amount="7000.00"))
+    rules, _ = _load_config(cur)
+
+    first = insert_alerts(cur, run_rules(cur, rules, ids), rules)
+    second = insert_alerts(cur, run_rules(cur, rules, ids), rules)
+
+    assert len(first) == 3  # velocity, blacklist, spike
+    assert second == []
+    cur.execute("SELECT count(*) FROM sg.alerts")
+    assert cur.fetchone()[0] == 3
+
+
+# -- security ---------------------------------------------------------------------------------
+
+
+def test_security_no_text_column_in_sg_tables_holds_a_card_number_like_value(db, publisher):
+    """CLAUDE.md: no 13-19 consecutive digits anywhere. Checked on real processed data (the
+    full producer scenario). Hex hashes (alert_id) are exempt: sha256 hex contains digit runs
+    by chance and is not card data (D-15)."""
+    batches, _ = scenario_batches(db)
+    run(db, publisher, batches)
+    with db.cursor() as cur:
+        cur.execute("""SELECT table_name, column_name, data_type FROM information_schema.columns
+                WHERE table_schema = 'sg'
+                  AND data_type IN ('text', 'character', 'character varying', 'ARRAY')
+                  AND column_name <> 'alert_id'
+                  AND table_name IN (SELECT table_name FROM information_schema.tables
+                                      WHERE table_schema = 'sg' AND table_type = 'BASE TABLE')""")
+        columns = cur.fetchall()
+        assert columns, "no text columns found"
+        offenders = []
+        for table, column, data_type in columns:
+            value = f"array_to_string({column}, ' ')" if data_type == "ARRAY" else column
+            # Identifiers come from information_schema; the pattern is a bound parameter.
+            cur.execute(
+                f"SELECT count(*) FROM sg.{table} WHERE {value} ~ %s",
+                (r"(^|[^0-9])[0-9]{13,19}([^0-9]|$)",),
+            )
+            if cur.fetchone()[0]:
+                offenders.append(f"sg.{table}.{column}")
+        cur.execute("SELECT count(*) FROM sg.enriched_transactions")
+        assert cur.fetchone()[0] > 0
+    db.rollback()
+    assert offenders == []
