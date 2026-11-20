@@ -44,8 +44,10 @@ All dataset views are in `sql/dash/02_datasets.sql`, built from the dash base vi
 5 minutes of data) · Consumer lag (text, `Not Available` when unknown) · Alerts per minute by rule.
 
 **Alerts**: Top triggered rules (bar) · Rules: totals and open · Alert backlog (open, oldest
-first, overdue after `backlog_overdue_minutes`) · Daily precision per rule (TP / (TP + FP),
-unreviewed counted separately, D-12) · Recent alerts.
+first, overdue after `backlog_overdue_minutes`) · Recent alerts.
+
+**Precision**: Precision by rule (all time) · Labelled vs unreviewed · Daily precision per rule ·
+Precision trend by rule · Recent labels. Labelling: `docs/feedback_loop.md`.
 
 **Pipeline health**: Pipeline status (lag and p95 latency against `ops.health_config`, DLQ rate
 over the last 15 minutes, seconds since last batch) · Consumer lag over time · p95 processing
@@ -77,5 +79,5 @@ Dashboard CSS only rounds chart corners and enlarges the Data Source banner. Aut
 
 ## Verified (2026-11-20)
 
-`build_superset_dashboard.py`: 12 datasets, 16 charts, 3 tabs; every dataset's row count in
+`build_superset_dashboard.py`: 14 datasets, 20 charts, 4 tabs; every dataset's row count in
 Superset equals SQL; all 16 charts open in Explore. Data Source: Live.
