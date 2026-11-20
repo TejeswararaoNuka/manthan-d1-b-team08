@@ -9,6 +9,9 @@ Otherwise the view reads a seeded demo.* table ("Demo"). Special cases:
   - lagSamples: with real metrics but no ops.lag_samples, lag is "Not Available" (no rows).
   - alertFeedback / opsAlerts follow alerts / streamMetrics: empty is normal for live data
     (no reviews yet, no incidents), so they never fall back to demo when their parent is real.
+  - alertFeedback with real alerts but no sg.alert_feedback table: "Fallback" to
+    dash_feedback.alert_feedback (same columns and key). When sg.alert_feedback appears,
+    `--migrate-feedback` upserts those rows into it and switches back (docs/feedback_loop.md).
 Superset datasets use only dash.* (sql/dash/02_datasets.sql), whose names and columns never
 change, so rerun this script when real tables arrive. dash."dataSource" says Live/Demo/Mixed.
 Never writes to sg.* or ops.*. Runs in one transaction.
@@ -120,6 +123,23 @@ SOURCES: dict[str, tuple[str, str, list[str]]] = {
     "healthConfig": ("ops.health_config", "demo.health_config", ["key", "value"]),
 }
 FOLLOWS = {"alertFeedback": "alerts", "opsAlerts": "streamMetrics"}
+FALLBACK_FEEDBACK = "dash_feedback.alert_feedback"
+# Where the feedback CLI writes, by alertFeedback mode.
+FEEDBACK_TARGET = {
+    "Real": "sg.alert_feedback",
+    "Fallback": FALLBACK_FEEDBACK,
+    "Demo": "demo.alert_feedback",
+}
+FALLBACK_FEEDBACK_DDL = """
+CREATE SCHEMA IF NOT EXISTS dash_feedback;
+CREATE TABLE IF NOT EXISTS dash_feedback.alert_feedback (
+    alert_id  text        PRIMARY KEY CHECK (alert_id ~ '^[0-9a-f]{64}$'),
+    label     text        NOT NULL CHECK (label IN ('TRUE_POSITIVE', 'FALSE_POSITIVE')),
+    analyst   text        NOT NULL,
+    noted_at  timestamptz NOT NULL DEFAULT now(),
+    comment   text
+);
+"""
 
 DERIVED_METRICS = """
 SELECT extract(epoch FROM m.minute)::bigint AS batch_id, m.minute AS recorded_at,
@@ -168,7 +188,12 @@ def decide_modes(cur) -> dict[str, str]:
         modes["lagSamples"] = "Not Available"
     for name, parent in FOLLOWS.items():
         real = SOURCES[name][0]
-        modes[name] = "Real" if modes[parent] != "Demo" and _exists(cur, real) else "Demo"
+        if modes[parent] == "Demo":
+            modes[name] = "Demo"
+        elif _exists(cur, real):
+            modes[name] = "Real"
+        else:
+            modes[name] = "Fallback" if name == "alertFeedback" else "Demo"
     return modes
 
 
@@ -177,7 +202,7 @@ def view_sql(name: str, mode: str) -> sql.Composed:
     target = sql.SQL("CREATE VIEW dash.{} AS ").format(sql.Identifier(name))
     if mode == "Derived":
         return target + sql.SQL(DERIVED_METRICS)
-    relation = demo if mode in ("Demo", "Not Available") else real
+    relation = {"Demo": demo, "Not Available": demo, "Fallback": FALLBACK_FEEDBACK}.get(mode, real)
     schema, table = relation.split(".")
     body = sql.SQL("SELECT {} FROM {}.{}").format(
         sql.SQL(", ").join(sql.SQL(c) for c in columns),  # fixed expressions from this file
@@ -194,6 +219,8 @@ def build(conn) -> list[tuple[str, str, int]]:
         cur.execute("SET LOCAL client_min_messages = warning")
         cur.execute((DASH_SQL / "01_demo.sql").read_text(encoding="utf-8"))
         modes = decide_modes(cur)
+        if modes["alertFeedback"] == "Fallback":
+            cur.execute(FALLBACK_FEEDBACK_DDL)
         cur.execute("DROP SCHEMA IF EXISTS dash CASCADE")
         cur.execute("CREATE SCHEMA dash")
         for name in SOURCES:
@@ -226,6 +253,17 @@ def build(conn) -> list[tuple[str, str, int]]:
         if cur.fetchone()[0]:
             cur.execute("GRANT USAGE ON SCHEMA dash TO superset_ro")
             cur.execute("GRANT SELECT ON ALL TABLES IN SCHEMA dash TO superset_ro")
+        cur.execute("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'feedback_writer')")
+        if cur.fetchone()[0]:
+            # The feedback CLI writes labels to the demo/fallback tables in those modes.
+            cur.execute("GRANT USAGE ON SCHEMA demo TO feedback_writer")
+            cur.execute("GRANT SELECT, INSERT, UPDATE ON demo.alert_feedback TO feedback_writer")
+            if _exists(cur, FALLBACK_FEEDBACK):
+                cur.execute("GRANT USAGE ON SCHEMA dash_feedback TO feedback_writer")
+                cur.execute(
+                    "GRANT SELECT, INSERT, UPDATE ON dash_feedback.alert_feedback "
+                    "TO feedback_writer"
+                )
         else:
             print(
                 "WARNING: role superset_ro missing; Superset must use the .env user "
@@ -234,9 +272,34 @@ def build(conn) -> list[tuple[str, str, int]]:
     return status
 
 
+def migrate_feedback(conn) -> tuple[int, int]:
+    """Upsert dash_feedback.alert_feedback into sg.alert_feedback (rows whose alert exists).
+    Returns (copied, skipped). The fallback table is kept, not dropped."""
+    with conn, conn.cursor() as cur:
+        if not (_exists(cur, FALLBACK_FEEDBACK) and _exists(cur, "sg.alert_feedback")):
+            raise SystemExit(
+                f"ERROR: --migrate-feedback needs both sg.alert_feedback and {FALLBACK_FEEDBACK}"
+            )
+        cur.execute("""INSERT INTO sg.alert_feedback (alert_id, label, analyst, noted_at, comment)
+               SELECT f.alert_id, f.label, f.analyst, f.noted_at, f.comment
+                 FROM dash_feedback.alert_feedback f
+                 JOIN sg.alerts a ON a.alert_id = f.alert_id
+               ON CONFLICT (alert_id) DO UPDATE SET
+                   label = EXCLUDED.label, analyst = EXCLUDED.analyst,
+                   noted_at = EXCLUDED.noted_at, comment = EXCLUDED.comment""")
+        copied = cur.rowcount
+        cur.execute("SELECT count(*) FROM dash_feedback.alert_feedback")
+        return copied, cur.fetchone()[0] - copied
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--db", help="database (default POSTGRES_DB)")
+    ap.add_argument(
+        "--migrate-feedback",
+        action="store_true",
+        help="copy dash_feedback.alert_feedback into sg.alert_feedback, then rebuild",
+    )
     args = ap.parse_args(argv)
     env = load_env()
     dbname = args.db or env.get("POSTGRES_DB")
@@ -245,6 +308,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     conn = pg_connect(env, dbname, app="streamguard-dash-layer")
     try:
+        if args.migrate_feedback:
+            copied, skipped = migrate_feedback(conn)
+            print(
+                f"Migrated feedback: {copied} rows upserted into sg.alert_feedback"
+                + (f", {skipped} skipped (alert not in sg.alerts)" if skipped else "")
+            )
         status = build(conn)
     finally:
         conn.close()

@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS demo.alerts (
     status text);
 CREATE TABLE IF NOT EXISTS demo.alert_feedback (
     alert_id text, label text, analyst text, noted_at timestamptz, comment text);
+-- Key for the feedback CLI's upsert when labelling demo alerts.
+CREATE UNIQUE INDEX IF NOT EXISTS alert_feedback_alert_id_key ON demo.alert_feedback (alert_id);
 CREATE TABLE IF NOT EXISTS demo.dlq_events (
     id bigint, reason_code text, error_detail text, raw_value text, source_topic text,
     kafka_partition integer, kafka_offset bigint, failed_at timestamptz);

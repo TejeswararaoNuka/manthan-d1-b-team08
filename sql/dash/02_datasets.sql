@@ -110,3 +110,16 @@ SELECT coalesce((SELECT to_char(consumer_lag, 'FM999,999,999') FROM g), 'Not Ava
   FROM cfg
   LEFT JOIN m ON true
  CROSS JOIN w;
+
+CREATE VIEW dash."recentLabels" AS
+SELECT f.noted_at, a.rule_id, f.label, f.analyst, f.comment, f.alert_id
+  FROM dash."alertFeedback" f
+  JOIN dash."alerts" a ON a.alert_id = f.alert_id
+ ORDER BY f.noted_at DESC
+ LIMIT 500;
+
+CREATE VIEW dash."labelCoverage" AS
+SELECT rule_id, sum(labelled) AS labelled, sum(unreviewed) AS unreviewed,
+       round(sum(true_positives)::numeric / nullif(sum(labelled), 0), 4) AS precision
+  FROM dash."rulePrecisionDaily"
+ GROUP BY rule_id;
