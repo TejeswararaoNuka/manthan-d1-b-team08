@@ -12,14 +12,16 @@ Lateness and dedup are explicit, not Spark's withWatermark/dropDuplicatesWithinW
 those run before foreachBatch and silently drop rows behind the watermark, so late events
 could never be kept and counted (D-04, D-08).
 
-Settings (env, overridable by flags): KAFKA_BOOTSTRAP, STARTING_OFFSETS (latest|earliest,
-used only for a new checkpoint), CHECKPOINT_DIR, MAX_OFFSETS_PER_TRIGGER, TRIGGER_SECONDS,
-SPARK_DRIVER_MEMORY, SPARK_JARS_DIR (jars baked into the image; no runtime Maven).
+Settings (env, overridable by flags): KAFKA_BOOTSTRAP, STARTING_OFFSETS (latest|earliest or
+Spark's per-partition JSON, used only for a new checkpoint), CHECKPOINT_DIR,
+MAX_OFFSETS_PER_TRIGGER, TRIGGER_SECONDS, SPARK_DRIVER_MEMORY, SPARK_JARS_DIR (jars baked into
+the image; no runtime Maven).
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 from pathlib import Path
 
@@ -66,6 +68,33 @@ def process_batch(df, batch_id: int) -> None:
             + (" [re-run: re-published only]" if result.rerun else ""),
             flush=True,
         )
+
+
+def parse_starting_offsets(value: str) -> str:
+    """Validate STARTING_OFFSETS: latest, earliest, or Spark's JSON for payments.raw with every
+    partition, e.g. {"payments.raw":{"0":1200,"1":-2,...}} (-2 = earliest, -1 = latest).
+    Spark requires all partitions of the topic when specific offsets are given."""
+    if value in ("latest", "earliest"):
+        return value
+    try:
+        doc = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(f"not latest, earliest or JSON: {exc}") from None
+    if (
+        not isinstance(doc, dict)
+        or set(doc) != {SOURCE_TOPIC}
+        or not isinstance(doc[SOURCE_TOPIC], dict)
+    ):
+        raise argparse.ArgumentTypeError(f'expected {{"{SOURCE_TOPIC}": {{"<partition>": N}}}}')
+    parts = doc[SOURCE_TOPIC]
+    for part, offset in parts.items():
+        if not part.isdigit() or isinstance(offset, bool) or not isinstance(offset, int):
+            raise argparse.ArgumentTypeError(f"bad partition/offset: {part!r}: {offset!r}")
+        if offset < -2:
+            raise argparse.ArgumentTypeError(f"offset {offset} < -2 for partition {part}")
+    if not parts:
+        raise argparse.ArgumentTypeError("no partitions given")
+    return json.dumps(doc, separators=(",", ":"))
 
 
 def reset(env, query_name: str, checkpoint: Path) -> None:
@@ -116,8 +145,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--starting-offsets",
         default=env.get("STARTING_OFFSETS", "latest"),
-        choices=["latest", "earliest"],
-        help="only used when the checkpoint is new",
+        type=parse_starting_offsets,
+        help="latest, earliest or per-partition JSON; only used when the checkpoint is new",
     )
     ap.add_argument("--reset", action="store_true", help="clear checkpoint and watermark first")
     ap.add_argument("--available-now", action="store_true", help="process backlog, then stop")
