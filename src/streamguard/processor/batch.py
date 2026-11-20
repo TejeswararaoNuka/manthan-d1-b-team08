@@ -52,8 +52,6 @@ class BatchContext:
     publisher: Publisher
     query_name: str = "processor"
     now: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
-    # Total consumer lag after this batch, given its records (None if unknown).
-    lag: Callable[[Sequence[Record]], int | None] | None = None
 
 
 @dataclass
@@ -317,13 +315,12 @@ def process_records(records: Sequence[Record], batch_id: int, ctx: BatchContext)
         elapsed = max(time.perf_counter() - started, 1e-6)
         cur.execute(
             """INSERT INTO ops.stream_metrics
-                   (batch_id, recorded_at, input_rows, processed_rows_per_sec, consumer_lag,
+                   (batch_id, recorded_at, input_rows, processed_rows_per_sec,
                     p95_latency_seconds, dlq_count, alert_count, late_count)
-               VALUES (%s, now(), %s, %s, %s, %s, %s, %s, %s)
+               VALUES (%s, now(), %s, %s, %s, %s, %s, %s)
                ON CONFLICT (batch_id) DO UPDATE SET
                    recorded_at = EXCLUDED.recorded_at, input_rows = EXCLUDED.input_rows,
                    processed_rows_per_sec = EXCLUDED.processed_rows_per_sec,
-                   consumer_lag = EXCLUDED.consumer_lag,
                    p95_latency_seconds = EXCLUDED.p95_latency_seconds,
                    dlq_count = EXCLUDED.dlq_count, alert_count = EXCLUDED.alert_count,
                    late_count = EXCLUDED.late_count""",
@@ -331,7 +328,6 @@ def process_records(records: Sequence[Record], batch_id: int, ctx: BatchContext)
                 batch_id,
                 len(records),
                 round(len(records) / elapsed, 2),
-                ctx.lag(records) if ctx.lag else None,
                 round(p95, 3) if p95 is not None else None,
                 len(dlq_rows),
                 len(new_alert_ids),
@@ -346,6 +342,20 @@ def process_records(records: Sequence[Record], batch_id: int, ctx: BatchContext)
                    last_batch_id = EXCLUDED.last_batch_id, watermark = EXCLUDED.watermark,
                    watermark_before = EXCLUDED.watermark_before, updated_at = now()""",
             (ctx.query_name, batch_id, new_watermark, watermark_before),
+        )
+        # Progress for the lag monitor (ADR-02): max offset per partition in this batch.
+        last_offsets: dict[tuple[str, int], int] = {}
+        for rec in records:
+            key = (rec.topic, rec.partition)
+            last_offsets[key] = max(last_offsets.get(key, -1), rec.offset)
+        execute_values(
+            cur,
+            """INSERT INTO ops.stream_offsets (topic, partition, last_processed_offset, updated_at)
+               VALUES %s
+               ON CONFLICT (topic, partition) DO UPDATE SET
+                   last_processed_offset = EXCLUDED.last_processed_offset,
+                   updated_at = EXCLUDED.updated_at""",
+            [(t, p, off, now) for (t, p), off in sorted(last_offsets.items())],
         )
         alert_rows = _alert_rows(cur, result.alerts)
     # committed: now Kafka (at-least-once, ADR-01)

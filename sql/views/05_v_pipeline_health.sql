@@ -1,5 +1,5 @@
--- Latest micro-batch metrics with lag / latency status against ops.health_config.
--- Always returns exactly one row; statuses are UNKNOWN until metrics or thresholds exist.
+-- Pipeline health: latest batch metrics + latest monitor lag sample, with status against
+-- ops.health_config. Always one row; statuses are UNKNOWN until data or thresholds exist.
 DROP VIEW IF EXISTS ops.v_pipeline_health;
 
 CREATE VIEW ops.v_pipeline_health AS
@@ -10,17 +10,24 @@ WITH cfg AS (
              WHERE key = 'latency_alert_seconds') AS latency_threshold
 ),
 latest AS (
-    SELECT *
-      FROM ops.stream_metrics
-     ORDER BY recorded_at DESC, batch_id DESC
+    SELECT * FROM ops.stream_metrics ORDER BY recorded_at DESC, batch_id DESC LIMIT 1
+),
+lag AS (
+    SELECT sampled_at, consumer_lag, unknown_partitions
+      FROM ops.lag_samples
+     WHERE topic = 'payments.raw'
+     ORDER BY sampled_at DESC
      LIMIT 1
 ),
 status AS (
     SELECT l.*,
+           g.sampled_at AS lag_sampled_at,
+           g.consumer_lag,
+           g.unknown_partitions,
            cfg.lag_threshold,
            cfg.latency_threshold,
-           CASE WHEN l.consumer_lag IS NULL OR cfg.lag_threshold IS NULL THEN 'UNKNOWN'
-                WHEN l.consumer_lag > cfg.lag_threshold THEN 'ALERT'
+           CASE WHEN g.consumer_lag IS NULL OR cfg.lag_threshold IS NULL THEN 'UNKNOWN'
+                WHEN g.consumer_lag > cfg.lag_threshold THEN 'ALERT'
                 ELSE 'OK' END                                              AS lag_status,
            CASE WHEN l.p95_latency_seconds IS NULL OR cfg.latency_threshold IS NULL
                      THEN 'UNKNOWN'
@@ -28,6 +35,7 @@ status AS (
                 ELSE 'OK' END                                              AS latency_status
       FROM cfg
       LEFT JOIN latest l ON true
+      LEFT JOIN lag g ON true
 )
 SELECT batch_id,
        recorded_at,
@@ -35,6 +43,8 @@ SELECT batch_id,
        input_rows,
        processed_rows_per_sec,
        consumer_lag,
+       lag_sampled_at,
+       unknown_partitions,
        lag_threshold,
        lag_status,
        p95_latency_seconds,

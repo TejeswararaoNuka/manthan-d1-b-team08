@@ -10,7 +10,6 @@ CREATE TABLE IF NOT EXISTS ops.stream_metrics (
     recorded_at             timestamptz   NOT NULL DEFAULT now(),
     input_rows              bigint        NOT NULL CHECK (input_rows >= 0),
     processed_rows_per_sec  numeric(12,2),
-    consumer_lag            bigint        CHECK (consumer_lag >= 0),
     p95_latency_seconds     numeric(10,3) CHECK (p95_latency_seconds >= 0),
     dlq_count               bigint        NOT NULL DEFAULT 0 CHECK (dlq_count >= 0),
     alert_count             bigint        NOT NULL DEFAULT 0 CHECK (alert_count >= 0),
@@ -30,6 +29,33 @@ CREATE TABLE IF NOT EXISTS ops.alerts (
 );
 
 CREATE INDEX IF NOT EXISTS ops_alerts_raised_at_idx ON ops.alerts (raised_at);
+
+-- Lag moved to ops.lag_samples (the monitor samples it; a batch row cannot exist while the
+-- processor is down). CASCADE drops v_pipeline_health, which sql/views re-creates.
+ALTER TABLE ops.stream_metrics DROP COLUMN IF EXISTS consumer_lag CASCADE;
+
+-- Last Kafka offset the processor finished, per partition (ADR-02). Spark keeps offsets in its
+-- checkpoint and never commits them to Kafka, so this is how a monitor on any machine can
+-- compute lag. Written in the same transaction as each batch; overwritten (not GREATEST) so a
+-- replay from earlier offsets shows up as lag.
+CREATE TABLE IF NOT EXISTS ops.stream_offsets (
+    topic                  text        NOT NULL,
+    partition              integer     NOT NULL,
+    last_processed_offset  bigint      NOT NULL,
+    updated_at             timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (topic, partition)
+);
+
+-- Consumer lag sampled by the monitor every 15 s: end offsets - (last_processed_offset + 1).
+-- consumer_lag is NULL when no partition has a processed offset yet (e.g. after a reset).
+CREATE TABLE IF NOT EXISTS ops.lag_samples (
+    topic               text        NOT NULL,
+    sampled_at          timestamptz NOT NULL DEFAULT now(),
+    consumer_lag        bigint      CHECK (consumer_lag >= 0),
+    lag_by_partition    jsonb       NOT NULL,
+    unknown_partitions  integer     NOT NULL DEFAULT 0,
+    PRIMARY KEY (topic, sampled_at)
+);
 
 -- Processor progress per streaming query (D-04, ADR-01). Written in the same transaction as
 -- each batch's data, so a re-run batch (same batch_id) is detected and only re-published.

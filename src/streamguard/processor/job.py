@@ -76,8 +76,9 @@ def reset(env, query_name: str, checkpoint: Path) -> None:
     conn = pg_connect(env, app="streamguard-processor")
     with conn, conn.cursor() as cur:
         cur.execute("DELETE FROM ops.processor_state WHERE query_name = %s", (query_name,))
+        cur.execute("DELETE FROM ops.stream_offsets WHERE topic = %s", (SOURCE_TOPIC,))
     conn.close()
-    print(f"Reset: cleared checkpoint {checkpoint} and the stored watermark for {query_name}")
+    print(f"Reset: cleared checkpoint {checkpoint} stored watermark and offsets for {query_name}")
 
 
 def build_spark(env, app: str = "streamguard-processor"):
@@ -126,14 +127,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.reset:
         reset(env, args.query_name, args.checkpoint)
 
-    from streamguard.processor.kafka_io import KafkaPublisher, LagReader
+    from streamguard.processor.kafka_io import KafkaPublisher
 
     configure(
         BatchContext(
             conn=pg_connect(env, app="streamguard-processor"),
             publisher=KafkaPublisher(env),
             query_name=args.query_name,
-            lag=LagReader(env),
         )
     )
     spark = build_spark(env)

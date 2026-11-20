@@ -1,10 +1,10 @@
-"""Kafka side of the processor: alert/DLQ publisher and consumer-lag lookup."""
+"""Kafka side of the processor: the alert/DLQ publisher (lag is the monitor's job, ADR-02)."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 
-from confluent_kafka import Consumer, KafkaException, Producer, TopicPartition
+from confluent_kafka import KafkaException, Producer
 
 from streamguard.common.settings import kafka_producer_conf
 
@@ -39,34 +39,3 @@ class KafkaPublisher:
         errors, self._errors = self._errors, []
         if remaining or errors:
             raise KafkaException(f"{remaining} undelivered, errors: {errors[:3]}")
-
-
-class LagReader:
-    """Lag after a batch = sum over its partitions of (topic end offset - next offset to read).
-    Partitions absent from the batch count as caught up (maxOffsetsPerTrigger spreads reads
-    over all lagging partitions, so they appear in the batch)."""
-
-    def __init__(self, env: Mapping[str, str]):
-        self._consumer = Consumer(
-            {
-                "bootstrap.servers": env["KAFKA_BOOTSTRAP"],
-                "group.id": "streamguard-processor-lag",  # metadata only, never commits
-                "enable.auto.commit": False,
-            }
-        )
-
-    def __call__(self, records: Sequence) -> int | None:
-        next_offsets: dict[tuple[str, int], int] = {}
-        for r in records:
-            key = (r.topic, r.partition)
-            next_offsets[key] = max(next_offsets.get(key, 0), r.offset + 1)
-        try:
-            total = 0
-            for (topic, partition), nxt in next_offsets.items():
-                _, high = self._consumer.get_watermark_offsets(
-                    TopicPartition(topic, partition), timeout=5
-                )
-                total += max(high - nxt, 0)
-            return total
-        except KafkaException:
-            return None
