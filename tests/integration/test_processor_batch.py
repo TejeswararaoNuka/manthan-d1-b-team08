@@ -54,7 +54,7 @@ def scenario_batches(db, phase1_split=None):
 
 
 def run(db, publisher, batches, first_batch_id=0):
-    ctx = BatchContext(conn=db, publisher=publisher, now=lambda: NOW, lag=lambda r: 0)
+    ctx = BatchContext(conn=db, publisher=publisher, now=lambda: NOW)
     return [process_records(b, first_batch_id + i, ctx) for i, b in enumerate(batches)]
 
 
@@ -192,4 +192,20 @@ def test_each_batch_writes_metrics_and_state(db, publisher):
         cur.execute(
             "SELECT batch_id, lag_status, latency_status, overall_status FROM ops.v_pipeline_health"
         )
-        assert cur.fetchone() == (1, "OK", "ALERT", "ALERT")
+        assert cur.fetchone() == (1, "UNKNOWN", "ALERT", "ALERT")  # no monitor sample yet
+
+
+def test_processor_records_last_offset_per_partition_for_the_lag_monitor(db, publisher):
+    batches, _ = scenario_batches(db)
+    run(db, publisher, batches)
+    expected = {}
+    for batch in batches:
+        for r in batch:
+            expected[r.partition] = max(expected.get(r.partition, -1), r.offset)
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT partition, last_processed_offset FROM ops.stream_offsets WHERE topic = %s",
+            (TOPIC,),
+        )
+        assert dict(cur.fetchall()) == expected
+    db.rollback()

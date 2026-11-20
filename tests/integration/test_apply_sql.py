@@ -99,7 +99,7 @@ def test_config_tables_are_seeded_from_yaml(cur):
         "sg.rule_config": 4,
         "sg.dq_config": 4,
         "sg.merchant_blacklist": 20,
-        "ops.health_config": 3,
+        "ops.health_config": 4,
     }
     cur.execute("SELECT value FROM sg.dq_config WHERE key = 'amount_ceiling'")
     assert cur.fetchone()[0] == "500000.00"
@@ -233,9 +233,11 @@ def test_pipeline_health_flags_lag_above_configured_threshold(cur):
     assert cur.fetchall() == [("UNKNOWN",)]
 
     cur.execute("UPDATE ops.health_config SET value = '100' WHERE key = 'lag_alert_threshold'")
-    cur.execute("""INSERT INTO ops.stream_metrics
-                       (batch_id, input_rows, consumer_lag, p95_latency_seconds)
-                   VALUES (1, 10, 50, 1.0), (2, 10, 150, 1.0)""")
+    cur.execute("""INSERT INTO ops.stream_metrics (batch_id, input_rows, p95_latency_seconds)
+                   VALUES (1, 10, 1.0), (2, 10, 1.0)""")
+    cur.execute("""INSERT INTO ops.lag_samples (topic, sampled_at, consumer_lag, lag_by_partition)
+                   VALUES ('payments.raw', now() - interval '15 seconds', 50, '{}'),
+                          ('payments.raw', now(), 150, '{}')""")
     cur.execute(
         "SELECT batch_id, lag_status, latency_status, overall_status " "FROM ops.v_pipeline_health"
     )

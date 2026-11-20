@@ -70,6 +70,7 @@ def test_health_thresholds_from_env_override_yaml_defaults():
         "lag_alert_threshold": 5000,
         "latency_alert_seconds": 30,
         "backlog_overdue_minutes": 15,
+        "alert_repeat_minutes": 10,
     }
     assert overridden["lag_alert_threshold"] == 123
     assert overridden["latency_alert_seconds"] == "7.5"
