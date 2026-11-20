@@ -1,0 +1,11 @@
+# For laptops without Docker or Java. No pyspark here (see requirements-spark.txt).
+confluent-kafka>=2.6
+psycopg2-binary>=2.9.10
+sqlalchemy>=2.0.31
+pyyaml>=6.0.2
+faker>=30.0
+numpy>=2.1
+pytest>=8.3
+black>=24.10
+ruff>=0.7
+python-dotenv>=1.0
