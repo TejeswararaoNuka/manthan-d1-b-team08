@@ -31,6 +31,19 @@ CREATE TABLE IF NOT EXISTS ops.alerts (
 
 CREATE INDEX IF NOT EXISTS ops_alerts_raised_at_idx ON ops.alerts (raised_at);
 
+-- Processor progress per streaming query (D-04, ADR-01). Written in the same transaction as
+-- each batch's data, so a re-run batch (same batch_id) is detected and only re-published.
+-- `watermark` only moves forward, to min(newest event_time, wall clock) - watermark_seconds;
+-- `watermark_before` is the value the last batch judged lateness against.
+-- `python -m streamguard.processor --reset` deletes the row together with the checkpoint.
+CREATE TABLE IF NOT EXISTS ops.processor_state (
+    query_name        text        PRIMARY KEY,
+    last_batch_id     bigint      NOT NULL,
+    watermark         timestamptz,
+    watermark_before  timestamptz,
+    updated_at        timestamptz NOT NULL DEFAULT now()
+);
+
 -- Health thresholds read by v_pipeline_health and v_alert_backlog (never hard-coded in SQL).
 -- Seeded by apply_sql.py from config/dq.yaml, overridden by LAG_ALERT_THRESHOLD /
 -- LATENCY_ALERT_SECONDS from .env when set.

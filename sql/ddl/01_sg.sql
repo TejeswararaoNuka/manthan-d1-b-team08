@@ -89,6 +89,10 @@ CREATE TABLE IF NOT EXISTS sg.enriched_transactions (
 CREATE INDEX IF NOT EXISTS enriched_transactions_card_time_idx
     ON sg.enriched_transactions (card_token, event_time);
 
+-- agg_1min recompute scans one minute of events at a time.
+CREATE INDEX IF NOT EXISTS enriched_transactions_event_time_idx
+    ON sg.enriched_transactions (event_time);
+
 -- Natural key alert_id = sha256(rule_id || dedup key) (D-07), written ON CONFLICT DO NOTHING
 -- so a replay never resets analyst state (ADR-01).
 CREATE TABLE IF NOT EXISTS sg.alerts (
@@ -108,6 +112,7 @@ CREATE TABLE IF NOT EXISTS sg.alerts (
 
 CREATE INDEX IF NOT EXISTS alerts_alert_time_idx ON sg.alerts (alert_time);
 CREATE INDEX IF NOT EXISTS alerts_rule_id_idx ON sg.alerts (rule_id);
+CREATE INDEX IF NOT EXISTS alerts_event_time_idx ON sg.alerts (event_time);
 CREATE INDEX IF NOT EXISTS alerts_open_idx ON sg.alerts (alert_time) WHERE status = 'OPEN';
 
 -- 1-minute aggregates. Written with absolute values, never count = count + n (ADR-01).
