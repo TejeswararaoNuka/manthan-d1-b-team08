@@ -73,11 +73,17 @@ PostgreSQL 16 · Superset 6.0.0 · Docker Compose. **No Airflow.**
   without Spark. Rules run in PostgreSQL against `sg.enriched_transactions` for the cards in the batch.
 
 ## Processor design
-- Entry point `process_batch(df, batch_id)` used by `foreachBatch`.
+- Entry point `process_batch(df, batch_id)` in `streamguard.processor.job`, used by `foreachBatch`.
+  It collects the micro-batch and calls `streamguard.processor.batch.process_records`, which
+  holds all logic. The processor runs in Docker (`processor` service), not on Windows.
 - It must be testable with a static DataFrame: unit/spark tests build a DataFrame in memory and
   call it directly. No Kafka in unit tests.
-- Order inside a batch: validate -> DLQ invalid -> dedup -> upsert `sg.enriched_transactions` -> run rule SQL
-  -> upsert `alerts` -> publish alerts to Kafka -> upsert `agg_1min`.
+- Order inside a batch, in ONE PostgreSQL transaction: validate -> `sg.dlq_events` -> dedup ->
+  lateness (D-04) -> insert `sg.enriched_transactions` -> rule SQL (`streamguard.rules.engine`)
+  -> insert `sg.alerts` -> recompute `sg.agg_1min` -> `ops.stream_metrics` + `ops.processor_state`.
+  After commit: publish dead letters to `payments.dlq` and alerts to `payments.alerts` (ADR-01).
+- No Spark `withWatermark` / `dropDuplicatesWithinWatermark`: they silently drop late rows
+  before `foreachBatch` (D-04, D-08).
 - Keep pure logic (validation, hashing, parsing) in plain Python under `streamguard/common` so it
   is unit-testable without Spark.
 
