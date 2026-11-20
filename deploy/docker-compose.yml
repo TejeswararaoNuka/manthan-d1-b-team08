@@ -233,23 +233,31 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  # monitor:
-  #   image: streamguard/producer:dev  # same python image as the producer
-  #   env_file: ../.env
-  #   environment:
-  #     PYTHONPATH: /opt/streamguard/src
-  #     POSTGRES_HOST: postgres
-  #     KAFKA_BOOTSTRAP: kafka:9092
-  #   volumes:
-  #     - ../src:/opt/streamguard/src:ro
-  #     - ../data/checkpoints:/opt/streamguard/data/checkpoints:ro   # lag = end offsets - checkpoint
-  #   command: ["python", "-m", "streamguard.metrics"]
-  #   depends_on:
-  #     kafka-init:
-  #       condition: service_completed_successfully
-  #     postgres:
-  #       condition: service_healthy
-  #   restart: unless-stopped
+  # ---------------------------------------------------------------------------
+  # Monitor: consumer lag (Kafka end offsets - ops.stream_offsets) and latency alerts into
+  # ops.alerts every 15 s (ADR-02). Needs only Kafka + PostgreSQL, so it could run anywhere.
+  # ---------------------------------------------------------------------------
+  monitor:
+    build:
+      context: ..
+      dockerfile: deploy/producer/Dockerfile   # python:3.13-slim + requirements.txt
+    image: streamguard/producer:dev
+    entrypoint: ["python", "-m", "streamguard.metrics"]
+    env_file: ../.env
+    environment:
+      PYTHONPATH: /opt/streamguard/src
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      KAFKA_BOOTSTRAP: kafka:9092
+    volumes:
+      - ../src:/opt/streamguard/src:ro
+    mem_limit: 256m
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   pgdata:
