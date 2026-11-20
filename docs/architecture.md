@@ -89,7 +89,7 @@ flowchart LR
   UI["Superset SQL Lab<br/>as feedback_writer"] -->|TP / FP upsert| FB
   AL --> UI
 
-  MON["Monitor<br/>lag, latency, DLQ rate, alerts/min"] -->|reads end offsets| RAW
+  MON["Monitor (every 15 s)<br/>lag = end offsets - ops.stream_offsets<br/>latency"] -->|reads end offsets| RAW
   MON -->|reads end offsets| DLQ
   SP -.->|StreamingQueryProgress| MON
   MON --> PH

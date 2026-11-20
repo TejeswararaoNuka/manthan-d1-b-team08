@@ -67,3 +67,38 @@ Applies to an offset reset, or a new checkpoint with `startingOffsets`:
 - Caveats:
   - Different micro-batch boundaries can change which events count as late. The replay test therefore uses `Trigger.AvailableNow` on a bounded input.
   - If thresholds changed since the original run, the replay can create new alerts. Their `rule_version` makes them traceable.
+
+---
+
+## ADR-02: Consumer lag and replay without a Kafka consumer group
+
+**Status:** Accepted (2026-11-20)
+
+### Context
+Spark's Kafka source keeps its offsets in the **checkpoint**: before a micro-batch it writes the
+exact offset range to `checkpoint/offsets/N`, and after the sink succeeds it writes
+`checkpoint/commits/N`. After a crash it re-reads exactly that range (ADR-01). It connects with
+a generated, throwaway group id (`spark-kafka-source-<uuid>...`) and **never commits offsets to
+Kafka**: a Kafka commit could not be atomic with the checkpoint or the sink, so it would only be
+a second, inconsistent copy of the truth.
+
+### Consequences
+- **Lag:** `kafka-consumer-groups --describe` shows nothing useful for Spark. Lag must be
+  computed as *topic end offsets − what the processor finished*. The processor writes
+  `ops.stream_offsets(topic, partition, last_processed_offset)` in the same transaction as each
+  batch, and `python -m streamguard.metrics` (the `monitor` service) computes, every 15 s,
+  `end offset − (last_processed_offset + 1)` per partition from Kafka admin. It needs only Kafka
+  and PostgreSQL, never the checkpoint folder, so it can run on any machine. Samples go to
+  `ops.lag_samples` (not `ops.stream_metrics`: that table is per batch, and no batch rows appear
+  while the processor is down, which is exactly when lag matters). `v_pipeline_health` combines
+  the latest sample with the latest batch.
+- **Alerts:** lag > `lag_alert_threshold` or p95 latency > `latency_alert_seconds`
+  (`ops.health_config`, seeded from `.env`) inserts into `ops.alerts` and logs
+  `*** OPS HIGH ***` on the change to failing, repeats every `alert_repeat_minutes`, and writes
+  a `RESOLVED` row on recovery.
+- **Replay:** `kafka-consumer-groups --reset-offsets` does nothing to Spark. Replay means a
+  **new checkpoint** with `startingOffsets` (`earliest`, or a JSON map of partition offsets);
+  `startingOffsets` is ignored once a checkpoint exists. `processor --reset` clears the
+  checkpoint, the stored watermark and `ops.stream_offsets`. See `docs/runbook/replay.md`.
+- Offsets are overwritten, not kept at their maximum, so a replay from earlier offsets shows up
+  as lag until the processor catches up.

@@ -84,6 +84,8 @@ PostgreSQL 16 · Superset 6.0.0 · Docker Compose. **No Airflow.**
   After commit: publish dead letters to `payments.dlq` and alerts to `payments.alerts` (ADR-01).
 - No Spark `withWatermark` / `dropDuplicatesWithinWatermark`: they silently drop late rows
   before `foreachBatch` (D-04, D-08).
+- Lag is not computed by the processor: it writes `ops.stream_offsets` per batch and the
+  `monitor` service (`python -m streamguard.metrics`) samples lag every 15 s (ADR-02).
 - Keep pure logic (validation, hashing, parsing) in plain Python under `streamguard/common` so it
   is unit-testable without Spark.
 
