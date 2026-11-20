@@ -165,31 +165,46 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
-  # Placeholders. Uncomment when the code exists.
-  # Code is mounted read-only from ../src and found through PYTHONPATH, so a code change
-  # needs `restart <service>`, not a rebuild. Inside Docker, override the localhost values from
-  # .env with the internal service names.
+  # Processor: Spark Structured Streaming, payments.raw -> PostgreSQL + alerts/DLQ topics.
+  # Code is mounted read-only from ../src (PYTHONPATH), so a code change needs
+  # `restart processor`, not a rebuild. Inside Docker, service names replace the localhost
+  # values from .env. Needs the schema: python scripts/apply_sql.py (once).
+  #   Fresh start for a scenario run:
+  #     ... stop processor && ... run --rm processor --reset --available-now  (or up -d again)
+  #   Spark tests:  ... run --rm --entrypoint python processor -m pytest -m spark
   # ---------------------------------------------------------------------------
-  # processor:
-  #   build:
-  #     context: ./processor          # Spark 4.0.1 + Java 17 + requirements-spark.txt
-  #   env_file: ../.env
-  #   environment:
-  #     PYTHONPATH: /opt/streamguard/src
-  #     POSTGRES_HOST: postgres
-  #     KAFKA_BOOTSTRAP: kafka:9092
-  #   volumes:
-  #     - ../src:/opt/streamguard/src:ro
-  #     - ../sql:/opt/streamguard/sql:ro
-  #     - ../config:/opt/streamguard/config:ro
-  #     - ../data/checkpoints:/opt/streamguard/data/checkpoints
-  #   depends_on:
-  #     kafka-init:
-  #       condition: service_completed_successfully
-  #     postgres:
-  #       condition: service_healthy
-  #   restart: unless-stopped
-  #
+  processor:
+    build:
+      context: ..
+      dockerfile: deploy/processor/Dockerfile
+    image: streamguard/processor:dev
+    env_file: ../.env
+    environment:
+      PYTHONPATH: /opt/streamguard/src
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      KAFKA_BOOTSTRAP: kafka:9092
+      STARTING_OFFSETS: ${STARTING_OFFSETS:-latest}
+      CHECKPOINT_DIR: /data/checkpoints/processor
+      SPARK_DRIVER_MEMORY: 1500m
+    volumes:
+      - ../src:/opt/streamguard/src:ro
+      - ../sql:/opt/streamguard/sql:ro
+      - ../config:/opt/streamguard/config:ro
+      - ../tests:/opt/streamguard/tests:ro
+      - ../scripts:/opt/streamguard/scripts:ro
+      - ../pyproject.toml:/opt/streamguard/pyproject.toml:ro
+      - ../data/checkpoints:/data/checkpoints
+    ports:
+      - "127.0.0.1:4040:4040"   # Spark UI
+    mem_limit: 2g
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   # ---------------------------------------------------------------------------
   # Producer (profile "producer"): synthetic payment events -> payments.raw
   #   docker compose --env-file .env -f deploy/docker-compose.yml --profile producer up -d --build
