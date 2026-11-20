@@ -1,11 +1,10 @@
-# StreamGuard local stack. Runs on PC 1 only; other laptops connect over the LAN.
+# StreamGuard local stack. Single-PC setup (D-15): everything runs on this machine.
 #
 # Always run from the repo root, passing the root .env explicitly:
 #   docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
-# Without --env-file, Compose looks for deploy/.env, KAFKA_HOST_IP falls back to localhost,
-# and other laptops cannot reach Kafka.
+# Without --env-file, Compose looks for deploy/.env and ignores the root .env.
 #
-# Ports published on all interfaces of PC 1:
+# Ports are published on 127.0.0.1 only, so nothing is reachable from the network:
 #   29092  Kafka (clients outside Docker)   5432  PostgreSQL   8088  Superset
 #
 # No secrets in this file: every credential comes from ../.env.
@@ -29,7 +28,7 @@ x-producer-common: &producer-common
   profiles: ["producer"]
   env_file: ../.env
   environment:
-    # Inside Docker, use service names instead of PC 1's LAN values from .env.
+    # Inside Docker, use service names instead of the localhost values from .env.
     POSTGRES_HOST: postgres
     POSTGRES_PORT: "5432"
     KAFKA_BOOTSTRAP: kafka:9092
@@ -47,7 +46,7 @@ services:
     image: apache/kafka:3.7.1
     hostname: kafka
     ports:
-      - "29092:29092"
+      - "127.0.0.1:29092:29092"
     environment:
       CLUSTER_ID: "c3RyZWFtZ3VhcmQtbG9jYWw"
       KAFKA_NODE_ID: 1
@@ -114,7 +113,7 @@ services:
     image: postgres:16
     env_file: ../.env
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       # Runs only when the data volume is empty. To re-run: down -v (deletes all data).
@@ -156,7 +155,7 @@ services:
         condition: service_completed_successfully
     command: ["/usr/bin/run-server.sh"]
     ports:
-      - "8088:8088"
+      - "127.0.0.1:8088:8088"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8088/health || exit 1"]
       interval: 15s
@@ -168,7 +167,7 @@ services:
   # ---------------------------------------------------------------------------
   # Placeholders. Uncomment when the code exists.
   # Code is mounted read-only from ../src and found through PYTHONPATH, so a code change
-  # needs `restart <service>`, not a rebuild. Inside Docker, override the LAN values from
+  # needs `restart <service>`, not a rebuild. Inside Docker, override the localhost values from
   # .env with the internal service names.
   # ---------------------------------------------------------------------------
   # processor:
@@ -195,9 +194,9 @@ services:
   # Producer (profile "producer"): synthetic payment events -> payments.raw
   #   docker compose --env-file .env -f deploy/docker-compose.yml --profile producer up -d --build
   # producer-seed writes 30-day card baselines first (same --seed/--cards as the producer).
-  # Requires the schema: python scripts/apply_sql.py (once, from any laptop).
+  # Requires the schema: python scripts/apply_sql.py (once).
   # Scenario run:  ... --profile producer run --rm producer --scenario all
-  #   (writes data/expected/all.json on PC 1)
+  #   (writes data/expected/all.json)
   # ---------------------------------------------------------------------------
   producer-seed:
     <<: *producer-common

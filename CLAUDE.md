@@ -7,15 +7,16 @@ enriched data, 1-minute aggregates and alerts to PostgreSQL, and gives analysts 
 and a feedback loop. Consumers: fraud analyst, risk manager, platform on-call engineer.
 Design references: `docs/use_case_card.md`, `docs/architecture.md`, `docs/decisions.md`.
 
-## Team setup
-- Only **PC 1** runs Docker (Kafka, PostgreSQL, processor, Superset).
-- Other laptops connect to PC 1 using `POSTGRES_HOST` and `KAFKA_BOOTSTRAP` from `.env`
-  (copy `.env.example`). They install `requirements.txt` only: no Docker, no Java, no pyspark.
-- Laptop setup: `python -m venv .venv`, `pip install -r requirements.txt`, `pip install -e .`
-  (so `python -m streamguard...` works). `confluent-kafka` stays pinned to 2.10.0: newer
+## Machine setup (single PC, D-15)
+- Everything runs on **one Windows PC**: Docker (Kafka, PostgreSQL, processor, Superset) and the
+  Python tooling. Ports are bound to `127.0.0.1` only; `.env` uses `localhost` (copy `.env.example`).
+- Nothing is pushed to a remote: commit locally on feature branches, no PRs.
+- Python setup: `python -m venv .venv`, activate it (`source .venv/Scripts/activate` in Git Bash),
+  `pip install -r requirements.txt`, `pip install -e .` (so `python -m streamguard...` works).
+  System Python has none of the packages. `confluent-kafka` stays pinned to 2.10.0: newer
   wheels are blocked by Windows Smart App Control.
 - Tests use `POSTGRES_TEST_DB`, **never** `POSTGRES_DB`.
-- Plain `pytest` runs unit tests only. Marked tests: `spark` (Java 17, PC 1 or CI), `kafka`,
+- Plain `pytest` runs unit tests only. Marked tests: `spark` (Java 17), `kafka`,
   `integration`.
 - Helper scripts in `scripts/` are Python, never bash, so they run on Windows.
 
@@ -82,7 +83,8 @@ PostgreSQL 16 · Superset 6.0.0 · Docker Compose. **No Airflow.**
 
 ## Security
 - Synthetic tokens only. No card-number-like values (13-19 consecutive digits) anywhere: code,
-  tests, fixtures, seed data, logs.
+  tests, fixtures, seed data, logs. Exception: hex hashes such as `alert_id` (sha256) may contain
+  digit runs by chance; they are not card data (D-15).
 - Secrets come only from environment variables / `.env`. Never commit `.env` or real credentials.
 
 ## Conventions
