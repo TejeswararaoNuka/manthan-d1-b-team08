@@ -1,0 +1,104 @@
+# StreamGuard CI: formatting, lint and every test group (unit, integration, kafka, spark)
+# against real PostgreSQL 16 and Kafka 3.7.1 service containers.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    env:
+      # Dummy CI credentials (no secrets): the same variables as .env.
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: streamguard
+      POSTGRES_TEST_DB: streamguard_test
+      POSTGRES_USER: streamguard
+      POSTGRES_PASSWORD: ci-postgres
+      SUPERSET_RO_PASSWORD: ci-superset-ro
+      FEEDBACK_WRITER_PASSWORD: ci-feedback-writer
+      KAFKA_BOOTSTRAP: localhost:9092
+      LAG_ALERT_THRESHOLD: "5000"
+      LATENCY_ALERT_SECONDS: "30"
+      SPARK_JARS_DIR: ${{ github.workspace }}/.jars
+      PGPASSWORD: ci-postgres
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: streamguard
+          POSTGRES_PASSWORD: ci-postgres
+          POSTGRES_DB: streamguard
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U streamguard -d streamguard"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+
+      kafka:
+        image: apache/kafka:3.7.1
+        env:
+          KAFKA_NODE_ID: "1"
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+        ports:
+          - 9092:9092
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"
+          --health-interval 10s --health-timeout 15s --health-retries 12 --health-start-period 20s
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-spark.txt
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Download Spark jars (same list as the processor image)
+        run: |
+          mkdir -p "$SPARK_JARS_DIR"
+          grep -v '^#' deploy/processor/jars.txt | grep . | while read -r path; do
+            curl -fsSL -o "$SPARK_JARS_DIR/$(basename "$path")" "https://repo1.maven.org/maven2/$path"
+          done
+          ls -l "$SPARK_JARS_DIR"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements-spark.txt
+
+      - name: Create test database and roles (deploy/postgres/init, as on first start)
+        run: |
+          psql --version   # ubuntu-24.04 runners ship psql 16 (\getenv needs 15+)
+          for f in deploy/postgres/init/*.sql; do
+            psql -v ON_ERROR_STOP=1 -h localhost -U streamguard -d streamguard -f "$f"
+          done
+
+      - name: black
+        run: black --check src tests scripts
+
+      - name: ruff
+        run: ruff check src tests scripts
+
+      - name: pytest (unit, integration, kafka, spark)
+        run: pytest -q -m "spark or kafka or integration or not (spark or kafka or integration)"

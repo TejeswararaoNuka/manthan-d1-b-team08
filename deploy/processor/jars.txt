@@ -1,0 +1,9 @@
+# Spark jars, relative to Maven Central. Read by deploy/processor/Dockerfile and CI so both use the
+# same set: the Kafka source for Structured Streaming 4.0.1 and its compile dependencies (from the
+# 4.0.1 POM; lz4, snappy, zstd, slf4j and hadoop-client ship with PySpark), plus the PostgreSQL
+# JDBC driver.
+org/apache/spark/spark-sql-kafka-0-10_2.13/4.0.1/spark-sql-kafka-0-10_2.13-4.0.1.jar
+org/apache/spark/spark-token-provider-kafka-0-10_2.13/4.0.1/spark-token-provider-kafka-0-10_2.13-4.0.1.jar
+org/apache/kafka/kafka-clients/3.9.1/kafka-clients-3.9.1.jar
+org/apache/commons/commons-pool2/2.12.0/commons-pool2-2.12.0.jar
+org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar

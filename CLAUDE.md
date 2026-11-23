@@ -7,12 +7,17 @@ enriched data, 1-minute aggregates and alerts to PostgreSQL, and gives analysts 
 and a feedback loop. Consumers: fraud analyst, risk manager, platform on-call engineer.
 Design references: `docs/use_case_card.md`, `docs/architecture.md`, `docs/decisions.md`.
 
-## Team setup
-- Only **PC 1** runs Docker (Kafka, PostgreSQL, processor, Superset).
-- Other laptops connect to PC 1 using `POSTGRES_HOST` and `KAFKA_BOOTSTRAP` from `.env`
-  (copy `.env.example`). They install `requirements.txt` only: no Docker, no Java, no pyspark.
+## Machine setup (single PC, D-15)
+- Everything runs on **one Windows PC**: Docker (Kafka, PostgreSQL, processor, Superset) and the
+  Python tooling. Ports are bound to `127.0.0.1` only; `.env` uses `localhost` (copy `.env.example`).
+- Work on feature branches and merge to `main` through a pull request on `origin` (GitHub);
+  never push to `main` directly. Runtime stays single-PC.
+- Python setup: `python -m venv .venv`, activate it (`source .venv/Scripts/activate` in Git Bash),
+  `pip install -r requirements.txt`, `pip install -e .` (so `python -m streamguard...` works).
+  System Python has none of the packages. `confluent-kafka` stays pinned to 2.10.0: newer
+  wheels are blocked by Windows Smart App Control.
 - Tests use `POSTGRES_TEST_DB`, **never** `POSTGRES_DB`.
-- Plain `pytest` runs unit tests only. Marked tests: `spark` (Java 17, PC 1 or CI), `kafka`,
+- Plain `pytest` runs unit tests only. Marked tests: `spark` (Java 17), `kafka`,
   `integration`.
 - Helper scripts in `scripts/` are Python, never bash, so they run on Windows.
 
@@ -52,34 +57,43 @@ PostgreSQL 16 · Superset 6.0.0 · Docker Compose. **No Airflow.**
 | `AMOUNT_OUT_OF_RANGE` | amount <= 0 or above ceiling | DLQ |
 | `CURRENCY_NOT_ALLOWED` | currency not in allowed list | DLQ |
 | `FUTURE_EVENT_TIME` | event_time > now + 24h | DLQ |
-| `LATE_EVENT` | older than the 2-minute watermark | **Not DLQ**: kept in `enriched_txn` with `is_late=true`, excluded from windowed rules, counted in metrics (D-04) |
+| `LATE_EVENT` | older than the 2-minute watermark | **Not DLQ**: kept in `sg.enriched_transactions` with `is_late=true`, excluded from windowed rules, counted in metrics (D-04) |
 
 ## Idempotency
 - Every PostgreSQL write is an upsert on a natural key (`INSERT ... ON CONFLICT`).
-- `enriched_txn` unique on `event_id`; `alerts` unique on `alert_id` (`DO NOTHING`, keeps analyst
-  state); `agg_1min` on its window key, written with absolute values, never `count = count + ...`.
+- `sg.enriched_transactions` unique on `event_id`; `alerts` unique on `alert_id` (`DO NOTHING`, keeps analyst
+  state); `sg.agg_1min` on its window key, written with absolute values, never `count = count + ...`.
 - Delivery is at-least-once (ADR-01). A replay of the same input must not create duplicate rows.
   Kafka alert duplicates are acceptable; consumers dedup by `alert_id`.
 
 ## Rules and thresholds
-- Rule and DQ thresholds live in PostgreSQL config tables (`fraud_rule`, `merchant_blacklist`,
-  DQ config) and are re-read **every micro-batch**. Never hard-code a threshold in Python or SQL.
-- `config/*.yaml` holds defaults that a script loads into those tables.
+- Rule and DQ thresholds live in PostgreSQL config tables (`sg.rule_config`,
+  `sg.merchant_blacklist`, `sg.dq_config`) and are re-read **every micro-batch**. Never hard-code a threshold in Python or SQL.
+- `config/*.yaml` holds defaults that `scripts/apply_sql.py` loads into those tables.
 - Rule logic lives in `sql/rules/*.sql`, one file per rule, so it is testable against PostgreSQL
-  without Spark. Rules run in PostgreSQL against `enriched_txn` for the cards in the batch.
+  without Spark. Rules run in PostgreSQL against `sg.enriched_transactions` for the cards in the batch.
 
 ## Processor design
-- Entry point `process_batch(df, batch_id)` used by `foreachBatch`.
+- Entry point `process_batch(df, batch_id)` in `streamguard.processor.job`, used by `foreachBatch`.
+  It collects the micro-batch and calls `streamguard.processor.batch.process_records`, which
+  holds all logic. The processor runs in Docker (`processor` service), not on Windows.
 - It must be testable with a static DataFrame: unit/spark tests build a DataFrame in memory and
   call it directly. No Kafka in unit tests.
-- Order inside a batch: validate -> DLQ invalid -> dedup -> upsert `enriched_txn` -> run rule SQL
-  -> upsert `alerts` -> publish alerts to Kafka -> upsert `agg_1min`.
+- Order inside a batch, in ONE PostgreSQL transaction: validate -> `sg.dlq_events` -> dedup ->
+  lateness (D-04) -> insert `sg.enriched_transactions` -> rule SQL (`streamguard.rules.engine`)
+  -> insert `sg.alerts` -> recompute `sg.agg_1min` -> `ops.stream_metrics` + `ops.processor_state`.
+  After commit: publish dead letters to `payments.dlq` and alerts to `payments.alerts` (ADR-01).
+- No Spark `withWatermark` / `dropDuplicatesWithinWatermark`: they silently drop late rows
+  before `foreachBatch` (D-04, D-08).
+- Lag is not computed by the processor: it writes `ops.stream_offsets` per batch and the
+  `monitor` service (`python -m streamguard.metrics`) samples lag every 15 s (ADR-02).
 - Keep pure logic (validation, hashing, parsing) in plain Python under `streamguard/common` so it
   is unit-testable without Spark.
 
 ## Security
 - Synthetic tokens only. No card-number-like values (13-19 consecutive digits) anywhere: code,
-  tests, fixtures, seed data, logs.
+  tests, fixtures, seed data, logs. Exception: hex hashes such as `alert_id` (sha256) may contain
+  digit runs by chance; they are not card data (D-15).
 - Secrets come only from environment variables / `.env`. Never commit `.env` or real credentials.
 
 ## Conventions

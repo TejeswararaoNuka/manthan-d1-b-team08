@@ -1,5 +1,6 @@
 # For laptops without Docker or Java. No pyspark here (see requirements-spark.txt).
-confluent-kafka>=2.6
+# Pinned: newer wheels (2.16.x) ship DLLs that Windows Smart App Control blocks on team laptops.
+confluent-kafka==2.10.0
 psycopg2-binary>=2.9.10
 sqlalchemy>=2.0.31
 pyyaml>=6.0.2

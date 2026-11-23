@@ -1,0 +1,266 @@
+# StreamGuard local stack. Single-PC setup (D-15): everything runs on this machine.
+#
+# Always run from the repo root, passing the root .env explicitly:
+#   docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
+# Without --env-file, Compose looks for deploy/.env and ignores the root .env.
+#
+# Ports are published on 127.0.0.1 only, so nothing is reachable from the network:
+#   29092  Kafka (clients outside Docker)   5432  PostgreSQL   8088  Superset
+#
+# No secrets in this file: every credential comes from ../.env.
+
+name: streamguard
+
+x-superset-common: &superset-common
+  build:
+    context: ./superset
+  image: streamguard/superset:6.0.0
+  env_file: ../.env
+  volumes:
+    - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+  mem_limit: 1500m
+
+x-producer-common: &producer-common
+  build:
+    context: ..
+    dockerfile: deploy/producer/Dockerfile
+  image: streamguard/producer:dev
+  profiles: ["producer"]
+  env_file: ../.env
+  environment:
+    # Inside Docker, use service names instead of the localhost values from .env.
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: "5432"
+    KAFKA_BOOTSTRAP: kafka:9092
+  volumes:
+    - ../src:/opt/streamguard/src:ro
+    - ../config:/opt/streamguard/config:ro
+    - ../data/expected:/opt/streamguard/data/expected
+  mem_limit: 256m
+
+services:
+  # ---------------------------------------------------------------------------
+  # Kafka: single-node KRaft (broker + controller in one process)
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:3.7.1
+    hostname: kafka
+    ports:
+      - "127.0.0.1:29092:29092"
+    environment:
+      CLUSTER_ID: "c3RyZWFtZ3VhcmQtbG9jYWw"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://${KAFKA_HOST_IP:-localhost}:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # Single node: replication factor 1 everywhere (architecture.md §4).
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics are created explicitly by kafka-init with the agreed settings.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_HEAP_OPTS: "-Xms512m -Xmx512m"
+    volumes:
+      - kafkadata:/var/lib/kafka/data
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 15s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  # One-shot: create topics from architecture.md §4 / decisions.md.
+  # Message keys are a producer concern (payments.raw is produced with key = card_token,
+  # payments.alerts with key = alert_id); Kafka has no per-topic key setting.
+  kafka-init:
+    image: apache/kafka:3.7.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        T=/opt/kafka/bin/kafka-topics.sh
+        B=kafka:9092
+        DAY=86400000
+        $$T --bootstrap-server $$B --create --if-not-exists --topic payments.raw \
+          --partitions 6 --replication-factor 1 \
+          --config retention.ms=$$((7 * DAY)) --config cleanup.policy=delete
+        $$T --bootstrap-server $$B --create --if-not-exists --topic payments.alerts \
+          --partitions 3 --replication-factor 1 \
+          --config retention.ms=$$((7 * DAY)) --config cleanup.policy=compact,delete
+        $$T --bootstrap-server $$B --create --if-not-exists --topic payments.dlq \
+          --partitions 3 --replication-factor 1 \
+          --config retention.ms=$$((14 * DAY)) --config cleanup.policy=delete
+        $$T --bootstrap-server $$B --describe --topic 'payments\..*'
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16
+    env_file: ../.env
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs only when the data volume is empty. To re-run: down -v (deletes all data).
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Superset 6.0.0 (metadata DB = "superset" database in the postgres service)
+  # ---------------------------------------------------------------------------
+  superset-init:
+    <<: *superset-common
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        superset db upgrade
+        superset fab create-admin \
+          --username "$$SUPERSET_ADMIN_USER" \
+          --password "$$SUPERSET_ADMIN_PASSWORD" \
+          --firstname Admin --lastname User \
+          --email "$${SUPERSET_ADMIN_EMAIL:-admin@example.com}" \
+          || echo "admin user already exists, skipping"
+        superset init
+    restart: "no"
+
+  superset:
+    <<: *superset-common
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+    command: ["/usr/bin/run-server.sh"]
+    ports:
+      - "127.0.0.1:8088:8088"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8088/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Processor: Spark Structured Streaming, payments.raw -> PostgreSQL + alerts/DLQ topics.
+  # Code is mounted read-only from ../src (PYTHONPATH), so a code change needs
+  # `restart processor`, not a rebuild. Inside Docker, service names replace the localhost
+  # values from .env. Needs the schema: python scripts/apply_sql.py (once).
+  #   Fresh start for a scenario run:
+  #     ... stop processor && ... run --rm processor --reset --available-now  (or up -d again)
+  #   Spark tests:  ... run --rm --entrypoint python processor -m pytest -m spark
+  # ---------------------------------------------------------------------------
+  processor:
+    build:
+      context: ..
+      dockerfile: deploy/processor/Dockerfile
+    image: streamguard/processor:dev
+    env_file: ../.env
+    environment:
+      PYTHONPATH: /opt/streamguard/src
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      KAFKA_BOOTSTRAP: kafka:9092
+      STARTING_OFFSETS: ${STARTING_OFFSETS:-latest}
+      CHECKPOINT_DIR: /data/checkpoints/processor
+      SPARK_DRIVER_MEMORY: 1500m
+    volumes:
+      - ../src:/opt/streamguard/src:ro
+      - ../sql:/opt/streamguard/sql:ro
+      - ../config:/opt/streamguard/config:ro
+      - ../tests:/opt/streamguard/tests:ro
+      - ../scripts:/opt/streamguard/scripts:ro
+      - ../pyproject.toml:/opt/streamguard/pyproject.toml:ro
+      - ../data/checkpoints:/data/checkpoints
+    ports:
+      - "127.0.0.1:4040:4040"   # Spark UI
+    mem_limit: 2g
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Producer (profile "producer"): synthetic payment events -> payments.raw
+  #   docker compose --env-file .env -f deploy/docker-compose.yml --profile producer up -d --build
+  # producer-seed writes 30-day card baselines first (same --seed/--cards as the producer).
+  # Requires the schema: python scripts/apply_sql.py (once).
+  # Scenario run:  ... --profile producer run --rm producer --scenario all
+  #   (writes data/expected/all.json)
+  # ---------------------------------------------------------------------------
+  producer-seed:
+    <<: *producer-common
+    entrypoint: ["python", "-m", "streamguard.producer.seed_baseline"]
+    command: ["--seed", "42", "--cards", "5000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  producer:
+    <<: *producer-common
+    command: ["--rate", "200", "--burst-rate", "1000", "--burst-every", "60",
+              "--burst-seconds", "5", "--seed", "42", "--cards", "5000"]
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      producer-seed:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Monitor: consumer lag (Kafka end offsets - ops.stream_offsets) and latency alerts into
+  # ops.alerts every 15 s (ADR-02). Needs only Kafka + PostgreSQL, so it could run anywhere.
+  # ---------------------------------------------------------------------------
+  monitor:
+    build:
+      context: ..
+      dockerfile: deploy/producer/Dockerfile   # python:3.13-slim + requirements.txt
+    image: streamguard/producer:dev
+    entrypoint: ["python", "-m", "streamguard.metrics"]
+    env_file: ../.env
+    environment:
+      PYTHONPATH: /opt/streamguard/src
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      KAFKA_BOOTSTRAP: kafka:9092
+    volumes:
+      - ../src:/opt/streamguard/src:ro
+    mem_limit: 256m
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+    name: streamguard_pgdata
+  kafkadata:
+    name: streamguard_kafkadata

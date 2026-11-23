@@ -1,0 +1,18 @@
+# Default data-quality and pipeline-health configuration.
+# Loaded by scripts/apply_sql.py: dq_config -> sg.dq_config, health_config -> ops.health_config.
+# Re-running the script keeps values changed at runtime; `--reset-config` restores these.
+
+dq_config:
+  # Flat ceiling on `amount` as sent, in the event's own currency, no FX (D-02).
+  # Quoted so it is parsed as an exact Decimal, never a float.
+  amount_ceiling: "500000.00"
+  allowed_currencies: [INR, USD, EUR, GBP, SGD, AED]   # D-01
+  max_future_hours: 24      # FUTURE_EVENT_TIME (D-11)
+  watermark_seconds: 120    # LATE_EVENT (D-04)
+
+health_config:
+  # LAG_ALERT_THRESHOLD / LATENCY_ALERT_SECONDS in .env override these when set.
+  lag_alert_threshold: 5000       # messages behind on payments.raw
+  latency_alert_seconds: 30       # p95 processed_at - event_time
+  backlog_overdue_minutes: 15     # open alert older than this is overdue (D-12)
+  alert_repeat_minutes: 10        # monitor re-raises a still-firing ops alert this often

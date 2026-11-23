@@ -1,0 +1,34 @@
+# Default fraud-rule configuration (D-06, D-07, D-09).
+# Loaded into sg.rule_config by scripts/apply_sql.py. Re-running the script keeps values
+# changed at runtime; `--reset-config` writes these defaults back (and bumps rule versions).
+# Rule logic is in sql/rules/; it reads these params, never hard-coded thresholds.
+
+rules:
+  VELOCITY:
+    name: More than max_tx transactions per card in a sliding window
+    enabled: true
+    severity: HIGH
+    params:
+      max_tx: 5            # alert when count in (t - window_seconds, t] > max_tx
+      window_seconds: 60
+
+  IMPOSSIBLE_TRAVEL:
+    name: Same card used in two countries within the window
+    enabled: true
+    severity: HIGH
+    params:
+      window_minutes: 30
+
+  AMOUNT_SPIKE:
+    name: Amount above multiplier x the card's 30-day average
+    enabled: true
+    severity: MEDIUM
+    params:
+      multiplier: 5
+      lookback_days: 30    # must match the sg.card_baseline refresh window (D-03)
+
+  MERCHANT_BLACKLIST:
+    name: Payment to a blacklisted merchant
+    enabled: true
+    severity: HIGH
+    params: {}
