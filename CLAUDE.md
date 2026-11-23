@@ -10,7 +10,8 @@ Design references: `docs/use_case_card.md`, `docs/architecture.md`, `docs/decisi
 ## Machine setup (single PC, D-15)
 - Everything runs on **one Windows PC**: Docker (Kafka, PostgreSQL, processor, Superset) and the
   Python tooling. Ports are bound to `127.0.0.1` only; `.env` uses `localhost` (copy `.env.example`).
-- Nothing is pushed to a remote: commit locally on feature branches, no PRs.
+- Work on feature branches and merge to `main` through a pull request on `origin` (GitHub);
+  never push to `main` directly. Runtime stays single-PC.
 - Python setup: `python -m venv .venv`, activate it (`source .venv/Scripts/activate` in Git Bash),
   `pip install -r requirements.txt`, `pip install -e .` (so `python -m streamguard...` works).
   System Python has none of the packages. `confluent-kafka` stays pinned to 2.10.0: newer
